@@ -13,22 +13,12 @@ on:
         type: boolean
         default: false
       op_model:
-        description: 'Select the OnePlus kernels to build'
+        description: 'Build target'
         required: true
         type: choice
         options:
-          - OOS14+15+16
-          - OOS15+16
-          - OOS14+15
-          - OOS16
-          - OOS15
-          - OOS14
-          - android16-6.12
-          - android15-6.6
-          - android14-6.1
-          - android13-5.15
-          - android12-5.10
-        default: OOS14+15+16
+          - oneplus_pad2_b
+        default: oneplus_pad2_b
       ksu_options:
         description: 'Enter KernelSU build json'
         required: true
@@ -40,6 +30,43 @@ on:
         type: choice
         options: [O2, O3]
         default: O2
+      lto_mode:
+        description: 'LTO mode override'
+        required: true
+        type: choice
+        options: [full, thin, none]
+        default: full
+      ikheaders:
+        description: 'Enable IKHEADERS'
+        required: true
+        type: boolean
+        default: false
+      disable_debug_kernel:
+        description: 'Disable DEBUG_KERNEL to avoid debug-only traces'
+        required: true
+        type: boolean
+        default: true
+      zram_profile:
+        description: 'ZRAM profile format: enabled/algorithm/disksize_bytes'
+        required: true
+        type: string
+        default: '1/lz4k/8589934592'
+      disable_xus_5us:
+        description: 'Disable XUS/5US'
+        required: true
+        type: boolean
+        default: true
+      build_mode:
+        description: 'Build mode policy'
+        required: true
+        type: choice
+        options: [fallback, fast]
+        default: fallback
+      build_timestamp:
+        description: 'KBUILD_BUILD_TIMESTAMP value'
+        required: true
+        type: string
+        default: 'Wed Dec 10 12:20:51 UTC 2025'
       clean_build:
         description: 'Clean build (no ccache)'
         type: boolean
@@ -93,52 +120,22 @@ jobs:
             exit 1
           fi
           
-          echo "[" > matrix.json
-          mapfile -t all_json_files < <(find configs/ -name "*.json" -print0 | xargs -0 -n1)
-          for i in "${!all_json_files[@]}"; do
-            file="${all_json_files[$i]}"
-            if [ -f "$file" ]; then
-              jq -r '.' "$file" >> matrix.json
-              if [ $((i+1)) -lt ${#all_json_files[@]} ]; then
-                echo "," >> matrix.json
-              fi
-            fi
-          done
-          echo "]" >> matrix.json
+          mapfile -t all_json_files < <(find configs/ -name "*.json" -type f | sort)
+          if [ "${#all_json_files[@]}" -eq 0 ]; then
+            echo "::error::No config JSON files found"
+            exit 1
+          fi
+          jq -s '.' "${all_json_files[@]}" > matrix.json
           
           jq_filter="."
           
           case "$input" in
-            OOS14+15+16)
-              ;;
-            OOS15+16)
-              jq_filter="map(select(.os_version == \"OOS15\" or .os_version == \"OOS16\"))"
-              ;;
-            OOS14+15)
-              jq_filter="map(select(.os_version == \"OOS14\" or .os_version == \"OOS15\"))"
-              ;;
-            OOS16)
-              jq_filter="map(select(.os_version == \"OOS16\"))"
-              ;;
-            OOS15)
-              jq_filter="map(select(.os_version == \"OOS15\"))"
-              ;;
-            OOS14)
-              jq_filter="map(select(.os_version == \"OOS14\"))"
-              ;;
-            android*-*.*)
-              # Extract android version and kernel version
-              IFS='-' read -r av kv <<< "$input"
-              
-              # Build android*-* only for OOS15 and OOS16
-              jq_filter="map(select(.os_version == \"OOS15\" or .os_version == \"OOS16\")) | map(select(.android_version == \"$av\" and .kernel_version == \"$kv\"))"
-              
-              echo "ℹ️  Android-Kernel filter applied: $av-$kv"
-              echo "   Restricted to: OOS15 and OOS16 only"
+            oneplus_pad2_b)
+              jq_filter='map(select(.model == "OP-PAD-2-SM8650"))'
               ;;
             *)
-              echo "::warning::Unknown input '$input'. Using empty filter."
-              jq_filter="map(select(false))"
+              echo "::error::Unsupported build target '$input'"
+              exit 1
               ;;
           esac
           
@@ -153,10 +150,8 @@ jobs:
             exit 1
           fi
           
-          # For each device + each ksu option → one combined entry
           merged_matrix=$(jq -n --argjson devices "$filtered" --argjson ksu_list "$ksu_options_normalized" '[ $devices[] as $dev | $ksu_list[] as $ksu | ($dev + {ksu_type: $ksu.type, ksu_hash: $ksu.hash}) ]')
-          
-          final_count=$(echo "$merged_matrix" | jq -s length)
+          final_count=$(jq 'length' <<<"$merged_matrix")
           
           wrapped=$(jq -n --argjson items "$merged_matrix" '{ include: $items }')
           
@@ -216,6 +211,24 @@ jobs:
             cat << 'EOF'
           `
           - Optimization: ${{ inputs.optimize_level }}
+          - Build Mode: ${{ inputs.build_mode }}
+          - LTO Override: ${{ inputs.lto_mode }}
+          - IKHEADERS: ${{ inputs.ikheaders && '✅ Enabled' || '❌ Disabled' }}
+          - Disable DEBUG_KERNEL: ${{ inputs.disable_debug_kernel && '✅ Yes' || '❌ No' }}
+          - Disable XUS/5US: ${{ inputs.disable_xus_5us && '✅ Yes' || '❌ No' }}
+          - ZRAM Profile: 
+          EOF
+
+            printf '%s' "${{ inputs.zram_profile }}"
+
+            cat << 'EOF'
+          
+          - Build Timestamp: 
+          EOF
+
+            printf '%s' "${{ inputs.build_timestamp }}"
+
+            cat << 'EOF'
           - Clean Build/No Ccache: ${{ inputs.clean_build && '✅ Yes' || '❌ No' }}
           - Create Release: ${{ inputs.make_release && '✅ Yes' || '❌ No' }}
           
@@ -223,7 +236,6 @@ jobs:
           EOF
           } >> "$GITHUB_STEP_SUMMARY"
           
-          # Display SUSFS config for each kernel version
           declare -A susfs_inputs=(
             ["android12-5.10"]="${{ inputs.android12-5_10_susfs_branch_or_commit }}"
             ["android13-5.15"]="${{ inputs.android13-5_15_susfs_branch_or_commit }}"
@@ -245,11 +257,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "> **💡 Note:** Empty values auto-map to matching \`gki-androidX-Y.Z\` branches." >> $GITHUB_STEP_SUMMARY
           
-          # Add OOS restriction note for android-kernel filters
-          if [[ "${{ inputs.op_model }}" == android*-*.* ]]; then
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "> **⚠️ Android-Kernel Filter:** Only OOS15 and OOS16 devices will be built for \`${{ inputs.op_model }}\`" >> $GITHUB_STEP_SUMMARY
-          fi
+          
 
   build:
     name: build (${{ matrix.model }}, ${{ matrix.soc }}, ${{ matrix.branch }}, ${{ matrix.manifest }}, ${{ matrix.android_version }}, ${{ matrix.kernel_version }}, ${{ matrix.os_version }}, ${{ matrix.ksu_type }})
@@ -379,7 +387,10 @@ jobs:
         id: prepare_config
         shell: bash
         run: |
-          echo "config_json=$(jq -nc --argjson m '${{ toJSON(matrix) }}' '$m | del(.ksu_type, .ksu_hash)')" >> "$GITHUB_OUTPUT"
+          echo "config_json=$(jq -nc \
+            --argjson m '${{ toJSON(matrix) }}' \
+            --arg lto '${{ inputs.lto_mode }}' \
+            '$m | del(.ksu_type, .ksu_hash) | .lto = $lto')" >> "$GITHUB_OUTPUT"
 
       - name: 🔨 Build Kernel
         id: build
@@ -391,6 +402,12 @@ jobs:
           susfs_commit_hash_or_branch: ${{ steps.susfs.outputs.susfs_branch }}
           optimize_level: ${{ inputs.optimize_level }}
           clean: ${{ inputs.clean_build }}
+          ikheaders: ${{ inputs.ikheaders }}
+          disable_debug_kernel: ${{ inputs.disable_debug_kernel }}
+          disable_xus_5us: ${{ inputs.disable_xus_5us }}
+          zram_profile: ${{ inputs.zram_profile }}
+          build_mode: ${{ inputs.build_mode }}
+          build_timestamp: ${{ inputs.build_timestamp }}
 
       - name: 📊 Build statistics
         id: build-stat

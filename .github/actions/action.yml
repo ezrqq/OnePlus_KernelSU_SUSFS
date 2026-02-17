@@ -32,6 +32,36 @@ inputs:
     required: false
     type: string
     default: 'false'
+  ikheaders:
+    description: 'Enable IKHEADERS in kernel config'
+    required: false
+    type: string
+    default: 'false'
+  disable_debug_kernel:
+    description: 'Disable DEBUG_KERNEL and trace_printk paths'
+    required: false
+    type: string
+    default: 'true'
+  disable_xus_5us:
+    description: 'Disable XUS/5US feature flags when present'
+    required: false
+    type: string
+    default: 'true'
+  zram_profile:
+    description: 'ZRAM profile in enabled/algorithm/disksize_bytes format'
+    required: false
+    type: string
+    default: '1/lz4k/8589934592'
+  build_mode:
+    description: 'Build mode: fallback or fast'
+    required: false
+    type: string
+    default: 'fallback'
+  build_timestamp:
+    description: 'KBUILD_BUILD_TIMESTAMP override'
+    required: false
+    type: string
+    default: 'Wed Dec 10 12:20:51 UTC 2025'
 
 outputs:
   kernel_version:
@@ -99,6 +129,12 @@ runs:
         lto="$OP_LTO"
         uname="$OP_UNAME"
         optimize='${{ inputs.optimize_level }}'
+        ikheaders='${{ inputs.ikheaders }}'
+        disable_debug_kernel='${{ inputs.disable_debug_kernel }}'
+        disable_xus_5us='${{ inputs.disable_xus_5us }}'
+        zram_profile='${{ inputs.zram_profile }}'
+        build_mode='${{ inputs.build_mode }}'
+        build_timestamp='${{ inputs.build_timestamp }}'
         
         errors=()
         
@@ -214,6 +250,34 @@ runs:
           O2|O3) ;;
           *) errors+=("optimize_level must be O2 or O3. Got: '$optimize'"); ;;
         esac
+
+        case "$ikheaders" in
+          true|false) ;;
+          *) errors+=("ikheaders must be true or false. Got: '$ikheaders'"); ;;
+        esac
+
+        case "$disable_debug_kernel" in
+          true|false) ;;
+          *) errors+=("disable_debug_kernel must be true or false. Got: '$disable_debug_kernel'"); ;;
+        esac
+
+        case "$disable_xus_5us" in
+          true|false) ;;
+          *) errors+=("disable_xus_5us must be true or false. Got: '$disable_xus_5us'"); ;;
+        esac
+
+        case "$build_mode" in
+          fallback|fast) ;;
+          *) errors+=("build_mode must be fallback or fast. Got: '$build_mode'"); ;;
+        esac
+
+        if [[ ! "$zram_profile" =~ ^(0|1)/[A-Za-z0-9_\-]+/[0-9]+$ ]]; then
+          errors+=("zram_profile must match enabled/algorithm/disksize_bytes. Got: '$zram_profile'")
+        fi
+
+        if [[ -z "$build_timestamp" ]]; then
+          errors+=("build_timestamp must not be empty")
+        fi
         
         if [ ${#errors[@]} -ne 0 ]; then
           echo "Found ${#errors[@]} validation error(s):" >&2
@@ -1224,7 +1288,7 @@ runs:
         source "$KERNEL_PLATFORM_FOLDER/build/kernel/_setup_env.sh" 2>/dev/null || true
         set -u
         
-        KERNEL_BUILD_DATE=$(date -u)
+        KERNEL_BUILD_DATE='${{ inputs.build_timestamp }}'
         export SOURCE_DATE_EPOCH=$COMMIT_TIMESTAMP
         export KBUILD_BUILD_TIMESTAMP="$KERNEL_BUILD_DATE"
         export KBUILD_BUILD_USER="${BUILD_USER:-kernel}"
@@ -1333,6 +1397,41 @@ runs:
         esac
         
         
+        if [ "${{ inputs.ikheaders }}" = "true" ]; then
+          scripts/config --file "$OUT/.config" -e IKHEADERS
+          scripts/config --file "$OUT/.config" -e IKCONFIG
+          scripts/config --file "$OUT/.config" -e IKCONFIG_PROC
+        else
+          scripts/config --file "$OUT/.config" -d IKHEADERS || true
+        fi
+
+        if [ "${{ inputs.disable_debug_kernel }}" = "true" ]; then
+          scripts/config --file "$OUT/.config" -d DEBUG_KERNEL || true
+          scripts/config --file "$OUT/.config" -d FTRACE || true
+          scripts/config --file "$OUT/.config" -d FUNCTION_TRACER || true
+          scripts/config --file "$OUT/.config" -d FUNCTION_GRAPH_TRACER || true
+          scripts/config --file "$OUT/.config" -d DYNAMIC_FTRACE || true
+          scripts/config --file "$OUT/.config" -d STACK_TRACER || true
+          scripts/config --file "$OUT/.config" -d BLK_DEV_IO_TRACE || true
+          scripts/config --file "$OUT/.config" -d KPROBE_EVENTS || true
+          scripts/config --file "$OUT/.config" -d UPROBE_EVENTS || true
+        fi
+
+        if [ "${{ inputs.disable_xus_5us }}" = "true" ]; then
+          scripts/config --file "$OUT/.config" -d XUS || true
+          scripts/config --file "$OUT/.config" -d _5US || true
+          scripts/config --file "$OUT/.config" -d FIVE_US || true
+        fi
+
+        IFS='/' read -r ZRAM_ENABLED ZRAM_ALGO ZRAM_SIZE <<< "${{ inputs.zram_profile }}"
+        if [ "$ZRAM_ENABLED" = "1" ]; then
+          scripts/config --file "$OUT/.config" -e ZRAM || true
+          scripts/config --file "$OUT/.config" --set-str ZRAM_DEF_COMP "$ZRAM_ALGO" || true
+          scripts/config --file "$OUT/.config" --set-val ZRAM_DISKSIZE "$ZRAM_SIZE" || true
+        else
+          scripts/config --file "$OUT/.config" -d ZRAM || true
+        fi
+
         make O="$OUT" olddefconfig
         
         KCFLAGS="$KCFLAGS -Wno-error -pipe -fno-stack-protector ${KCFLAGS_EXTRA}"
@@ -1350,7 +1449,12 @@ runs:
         echo "Timestamp: $KBUILD_BUILD_TIMESTAMP"
         echo "Workspace: $WORKSPACE"
         
-        if [ "${{ inputs.clean }}" != "true" ]; then
+        if [ "${{ inputs.build_mode }}" = "fallback" ]; then
+          export CCACHE_DISABLE=1
+          echo "Build mode: fallback (ccache disabled for stability)"
+        fi
+
+        if [ "${{ inputs.clean }}" != "true" ] && [ "${CCACHE_DISABLE:-0}" != "1" ]; then
           echo "ccache: ENABLED"
           echo "  Dir: $CCACHE_DIR"
           echo "  Base: $CCACHE_BASEDIR"
