@@ -200,9 +200,9 @@ jobs:
                   cachesByType.ccache.count++;
                   
                   // Extract device name from ccache key
-                  const match = cache.key.match(/ccache-([^-]+)-/);
-                  if (match) {
-                    const device = match[1];
+                  const match = cache.key.match(/^ccache-(.+?)-(?:android\d+|OOS\d+)-/);
+                  const device = match ? match[1] : 'unknown';
+                  if (device !== 'unknown') {
                     if (!cachesByDevice.has(device)) {
                       cachesByDevice.set(device, { 
                         size: 0, 
@@ -220,6 +220,9 @@ jobs:
                     if (new Date(cache.last_accessed_at) > new Date(deviceData.lastAccessed)) {
                       deviceData.lastAccessed = cache.last_accessed_at;
                     }
+                  } else {
+                    cachesByType.other.size += cache.size_in_bytes;
+                    cachesByType.other.count++;
                   }
                 } else if (cache.key.includes('apt')) {
                   cachesByType.apt.size += cache.size_in_bytes;
@@ -717,7 +720,7 @@ jobs:
               const deviceDeletions = new Map();
               for (const cache of deletedCaches) {
                 if (cache.category === 'ccache') {
-                  const match = cache.key.match(/ccache-([^-]+)-/);
+                  const match = cache.key.match(/^ccache-(.+?)-(?:android\d+|OOS\d+)-/);
                   if (match) {
                     const device = match[1];
                     if (!deviceDeletions.has(device)) {
@@ -968,7 +971,7 @@ jobs:
                   cachesByType.ccache += cache.size_in_bytes;
                   
                   // Track build frequency
-                  const match = cache.key.match(/ccache-([^-]+)-/);
+                  const match = cache.key.match(/^ccache-(.+?)-(?:android\d+|OOS\d+)-/);
                   if (match && new Date(cache.last_accessed_at) > recentCutoff) {
                     const device = match[1];
                     buildFrequency.set(device, (buildFrequency.get(device) || 0) + 1);
